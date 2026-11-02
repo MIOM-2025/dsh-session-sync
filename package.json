@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-sync",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "在局域网内实时同步 DSH 会话（绘画）的小插件：两端安装后配对，即可按会话勾选同步，支持本地数据与 HTTP 调用两种方式。",

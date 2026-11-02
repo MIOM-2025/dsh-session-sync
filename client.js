@@ -146,6 +146,20 @@ window.__ModuleLoader__.load({
             React.createElement('button', { style: ui.button, disabled: busy !== '', onClick: () => run('sync', () => call('/sync', {})) }, busy === 'sync' ? '同步中…' : '立即同步')
           ),
           React.createElement('div', { style: ui.row },
+            React.createElement('span', { style: ui.hint }, '本机令牌：'),
+            React.createElement('code', { style: { fontSize: 10, wordBreak: 'break-all', flex: 1, minWidth: 120 } }, state.token),
+            React.createElement('button', { style: ui.button, onClick: () => { try { navigator.clipboard.writeText(state.token); setStatus('令牌已复制，发给对方即可'); } catch (cause) { setStatus(state.token); } } }, '复制'),
+            React.createElement('button', { style: ui.button, disabled: busy !== '', onClick: () => run('token', async () => { const next = await call('/token/rotate', {}); setStatus('已生成新令牌：' + next.token); }) }, '生成新令牌')
+          ),
+          React.createElement('div', { style: ui.row },
+            React.createElement('span', { style: ui.hint }, '全局权限：'),
+            React.createElement('select', { style: { ...ui.input, flex: '0 0 130px' }, value: state.defaultAccess ?? 'work', onChange: (event) => run('gaccess', () => call('/access', { access: event.target.value })) },
+              React.createElement('option', { value: 'work' }, '可共同工作'),
+              React.createElement('option', { value: 'read' }, '只读')
+            ),
+            React.createElement('span', { style: ui.hint }, '单个会话没单独设置时，就按这个来')
+          ),
+          React.createElement('div', { style: ui.row },
             React.createElement('input', { style: ui.input, value: url, placeholder: '对方地址，例如 192.168.1.8:' + state.port, onChange: (event) => setUrl(event.target.value) }),
             React.createElement('input', { style: { ...ui.input, flex: '0 0 140px' }, value: pairToken, placeholder: '对方令牌（可选）', onChange: (event) => setPairToken(event.target.value) }),
             React.createElement('select', { style: { ...ui.input, flex: '0 0 120px' }, value: scope, onChange: (event) => setScope(event.target.value) },
@@ -187,6 +201,11 @@ window.__ModuleLoader__.load({
               state.sessions.map((session) => React.createElement('label', { key: session.id, style: ui.item },
                 React.createElement('input', { type: 'checkbox', checked: session.enabled, onChange: (event) => run(session.id, () => call('/toggle', { id: session.id, enabled: event.target.checked })) }),
                 React.createElement('span', { style: ui.name, title: session.cwd || session.group }, (session.title || '(无标题)') + ' · ' + session.id.slice(8, 16)),
+                React.createElement('select', { style: { ...ui.input, flex: '0 0 96px' }, value: session.access ?? 'follow', onClick: (event) => { event.preventDefault(); event.stopPropagation(); }, onChange: (event) => run('acc-' + session.id, () => call('/access', { id: session.id, access: event.target.value })) },
+                  React.createElement('option', { value: 'follow' }, '跟随全局'),
+                  React.createElement('option', { value: 'work' }, '可共同工作'),
+                  React.createElement('option', { value: 'read' }, '只读')
+                ),
                 React.createElement('span', { style: ui.meta }, bytes(session.size))
               ))
             )

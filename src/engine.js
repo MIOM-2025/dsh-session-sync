@@ -97,6 +97,8 @@ export class SyncEngine {
       autoSync: true,
       allowPair: true,
       pairCode: '',
+      defaultAccess: 'work',
+      mirrors: {},
       peers: [],
       sessions: {},
       events: [],
@@ -247,11 +249,12 @@ export class SyncEngine {
         mtime: raw.mtime,
         hash: record.hash,
         enabled: st.sync === true,
+        access: st.access ?? 'follow',
         lastPushedHash: st.lastHash ?? null,
         lastSyncAt: st.lastSyncAt ?? null,
       });
     }
-    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions, queue: this.queueStatus(), live: this.liveSummary(), mirrors: this.state.mirrors ?? {} };
+    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), defaultAccess: this.state.defaultAccess ?? 'work', sessions, queue: this.queueStatus(), live: this.liveSummary(), mirrors: this.state.mirrors ?? {} };
     if (withRemote) {
       result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, scope: peer.scope ?? 'work', ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
       result.remote = [...this.remote.entries()].map(([url, value]) => ({ url, ok: value.ok, at: value.at, sessions: value.sessions }));
@@ -427,6 +430,28 @@ export class SyncEngine {
     return { url, device: data.device ?? ping.device, scope: data.scope ?? wanted };
   }
 
+  setSessionAccess(id, access) {
+    const value = ['follow', 'read', 'work'].includes(access) ? access : 'follow';
+    this.state.sessions[id] = { ...(this.state.sessions[id] ?? {}), access: value };
+    this.record('access ' + id + ' -> ' + value);
+    this.save();
+    return { id, access: value };
+  }
+
+  setGlobalAccess(access) {
+    this.state.defaultAccess = access === 'read' ? 'read' : 'work';
+    this.record('global access -> ' + this.state.defaultAccess);
+    this.save();
+    return this.state.defaultAccess;
+  }
+
+  rotateToken() {
+    this.state.token = crypto.randomBytes(16).toString('hex');
+    this.record('token rotated');
+    this.save();
+    return this.state.token;
+  }
+
   setToken(token) {
     const value = String(token ?? '').trim();
     if (value.length < 8) throw new Error('token too short');
@@ -531,6 +556,10 @@ export class SyncEngine {
 
   async submitCommand(command) {
     const type = String(command?.type ?? '');
+    const sessionKey = String(command?.sessionId ?? command?.id ?? '');
+    const access = this.state.sessions[sessionKey]?.access ?? 'follow';
+    const effective = access === 'follow' ? (this.state.defaultAccess ?? 'work') : access;
+    if (effective === 'read' && type !== 'stop') return { ok: false, error: 'session read-only' };
     if (type === 'stop') {
       // 停止必须立刻生效，不能排在回合后面
       return this.handleCommand(command);

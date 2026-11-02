@@ -70,6 +70,32 @@ const rejected = await engine.install({ id, group: '--tmp--', data: bytes.toStri
 assert.equal(rejected.skipped, 'local owner');
 console.log('PASS single writer guard');
 
+
+// 会话级权限：只读会话拒绝消息，但停止仍然放行
+engine.state.sessions[id] = { ...(engine.state.sessions[id] ?? {}), access: 'read' };
+const blocked = await engine.submitCommand({ id, type: 'message', text: 'nope' });
+assert.equal(blocked.ok, false);
+assert.match(String(blocked.error), /read-only/);
+const stillStop = await engine.submitCommand({ id, type: 'stop' });
+assert.equal(stillStop.ok, true);
+console.log('PASS per-session read-only');
+
+// 全局只读：跟随全局的会话也被拒
+engine.setSessionAccess(id, 'follow');
+engine.setGlobalAccess('read');
+const blockedGlobal = await engine.submitCommand({ id, type: 'message', text: 'no' });
+assert.equal(blockedGlobal.ok, false);
+engine.setGlobalAccess('work');
+console.log('PASS global read-only');
+
+// 令牌轮换
+const oldToken = engine.state.token;
+const newToken = engine.rotateToken();
+assert.notEqual(oldToken, newToken);
+assert.equal(engine.state.token, newToken);
+console.log('PASS token rotation');
+
+
 await engine.stop();
 await fsp.rm(home, { recursive: true, force: true });
 console.log('QUEUE TESTS PASSED');

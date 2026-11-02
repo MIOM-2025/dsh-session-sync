@@ -199,6 +199,14 @@ async function panel(engine, connection, req, res) {
     if (route === '/api/live' && req.method === 'GET') {
       return json(200, { events: engine.liveSnapshot(url.searchParams.get('url') ?? '', url.searchParams.get('id') ?? '') });
     }
+    if (route === '/api/access' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      if (typeof body.id === 'string' && body.id.length > 0) return json(200, engine.setSessionAccess(body.id, body.access));
+      return json(200, { access: engine.setGlobalAccess(body.access) });
+    }
+    if (route === '/api/token/rotate' && req.method === 'POST') {
+      return json(200, { token: engine.rotateToken() });
+    }
     if (route === '/api/scope' && req.method === 'POST') {
       const body = await jsonOf(req);
       return json(200, engine.setPeerScope(body.url, body.scope));
