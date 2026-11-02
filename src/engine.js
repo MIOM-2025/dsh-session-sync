@@ -80,6 +80,8 @@ export class SyncEngine {
     this.live = null;
     this.commandHandler = null;
     this.network = this.host === '127.0.0.1' || this.host === 'localhost' ? 'local' : 'lan';
+    this.localGroup = options.localGroup ?? this.encodeGroup(process.cwd());
+    this.mirrors = {};
     this.turns = new Map();
     this.queue = [];
     this.queueRunning = null;
@@ -159,7 +161,7 @@ export class SyncEngine {
     this.live = new LiveRelay(this, {
       getSharedIds: () => this.enabledIds(),
       onCommand: (command) => this.handleCommand(command),
-      onRemoteEvent: (id, event) => this.remoteEventHook?.(id, event),
+      onRemoteEvent: (id, event, url) => this.handleRemoteEvent(id, event, url),
       log: (message) => this.log(message),
     });
     return this;
@@ -249,7 +251,7 @@ export class SyncEngine {
         lastSyncAt: st.lastSyncAt ?? null,
       });
     }
-    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions, queue: this.queueStatus() };
+    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions, queue: this.queueStatus(), live: this.liveSummary(), mirrors: this.state.mirrors ?? {} };
     if (withRemote) {
       result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, scope: peer.scope ?? 'work', ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
       result.remote = [...this.remote.entries()].map(([url, value]) => ({ url, ok: value.ok, at: value.at, sessions: value.sessions }));
@@ -336,6 +338,68 @@ export class SyncEngine {
       }
     }
     return '127.0.0.1';
+  }
+
+  encodeGroup(cwd) {
+    return '--' + String(cwd).replace(/^\//, '').replace(/\//g, '-') + '--';
+  }
+
+  // 回合结束 → 把远端会话镜像成本地副本（不同 id，避免两个写者）
+  async handleRemoteEvent(sessionId, event, url) {
+    if (typeof sessionId !== 'string') return;
+    if (event?.type === 'turn/end') {
+      this.mirrorRemote(url, sessionId).catch((error) => this.log('mirror failed: ' + String(error)));
+    }
+  }
+
+  async mirrorRemote(rawUrl, id) {
+    const url = normalizeUrl(rawUrl);
+    const peer = this.state.peers.find((entry) => entry.url === url);
+    if (peer === undefined) throw new Error('unknown peer');
+    const payload = await this.getJson(peer, '/session?id=' + encodeURIComponent(id));
+    if (typeof payload.data !== 'string') throw new Error('no data');
+    const bytes = Buffer.from(payload.data, 'base64');
+    const mirrorId = 'session-' + id.replace(/^session-/, 'mirror-');
+    const out = this.rewriteMirror(bytes, mirrorId, this.localGroup);
+    const dir = path.join(this.sessionsRoot, this.localGroup, mirrorId);
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, SESSION_FILE);
+    const tmp = file + '.tmp-' + process.pid;
+    await fsp.writeFile(tmp, out);
+    await fsp.rename(tmp, file);
+    this.state.mirrors = this.state.mirrors ?? {};
+    this.state.mirrors[mirrorId] = { source: id, peer: url, at: Date.now(), title: payload.title ?? '' };
+    this.hashes.delete(mirrorId);
+    this.record('mirrored ' + id + ' -> ' + mirrorId);
+    this.save();
+    return { mirrorId, file };
+  }
+
+  rewriteMirror(bytes, mirrorId, group) {
+    const cwd = process.cwd();
+    const text = zlib.zstdDecompressSync(bytes).toString('utf8');
+    const lines = text.split('\n').filter((line) => line.trim().length > 0).map((line) => {
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'session') {
+          event.id = mirrorId;
+          event.cwd = cwd;
+        }
+        if (event.type === 'session/title' && typeof event.data?.title === 'string') {
+          event.data.title = event.data.title + ' · 远端镜像';
+        }
+        return JSON.stringify(event);
+      } catch { return line; }
+    });
+    return zlib.zstdCompressSync(Buffer.from(lines.join('\n') + '\n'));
+  }
+
+  liveSummary() {
+    return (this.live?.watches() ?? []).map((entry) => ({
+      url: entry.url,
+      id: entry.id,
+      events: (this.live?.snapshot(entry.url, entry.id) ?? []).slice(-40),
+    }));
   }
 
   // 一次性令牌配对：对方把本机面板上显示的令牌填进来即可，双方从此各用各的设备令牌。
@@ -427,7 +491,7 @@ export class SyncEngine {
       const raw = this.scanSessions().find((session) => session.id === id);
       if (!raw) return json(404, { error: 'not found' });
       const st = this.state.sessions[id];
-      if (!st || st.sync !== true) return json(403, { error: 'not shared' });
+      if ((!st || st.sync !== true) && this.state.shared[id] !== true) return json(403, { error: 'not shared' });
       const record = await this.describe(raw, true);
       return json(200, { id, group: raw.group, title: record.title, cwd: record.cwd, size: raw.size, mtime: raw.mtime, hash: record.hash, data: record.bytes.toString('base64') });
     }

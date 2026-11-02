@@ -117,10 +117,14 @@ vm.createContext(sandbox);
 vm.runInContext(clientSource, sandbox);
 assert.equal(typeof exported.apply, 'function');
 assert.deepEqual(exported.inject, ['slots']);
-let section;
-const clientCtx = { slots: { inject: (name, register) => { assert.equal(name, 'settings.section'); register(); }, register: (decl, component) => { assert.equal(decl.id, 'session-sync'); section = component; return () => {}; } } };
+const components = {};
+const clientCtx = { slots: {
+  inject: (name, register) => { assert.ok(['settings.section', 'conversation.composer.dock'].includes(name), 'unexpected slot ' + name); register(); },
+  register: (decl, component) => { components[decl.id] = component; return () => {}; },
+} };
 exported.apply(clientCtx);
-assert.equal(typeof section, 'function');
+assert.equal(typeof components['session-sync'], 'function');
+assert.equal(typeof components['dsh-session-sync-live'], 'function');
 console.log('PASS client bundle');
 
 await ctx.sessionSync.stop();

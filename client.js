@@ -236,6 +236,36 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function LiveDock() {
+      const [state, setState] = useState(null);
+      const [stopping, setStopping] = useState(false);
+      useEffect(() => {
+        let alive = true;
+        const tick = async () => { try { const next = await call('/state'); if (alive) setState(next); } catch { /* ignore */ } };
+        tick();
+        const timer = setInterval(tick, 1000);
+        return () => { alive = false; clearInterval(timer); };
+      }, []);
+      const live = state?.live ?? [];
+      if (live.length === 0) return null;
+      const item = live[0];
+      const events = item.events ?? [];
+      const last = [...events].reverse().find((event) => event.text !== undefined);
+      const raw = last === undefined ? '' : (typeof last.text === 'string' ? last.text : JSON.stringify(last.text));
+      const text = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
+      const stop = async () => {
+        setStopping(true);
+        try { await call('/command', { url: item.url, id: item.id, type: 'stop' }); } catch { /* ignore */ } finally { setStopping(false); }
+      };
+      return React.createElement('div', {
+        style: { margin: '4px auto 0', maxWidth: 'var(--dsh-composer-card-max-width)', width: 'calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance))', display: 'flex', gap: 8, alignItems: 'center', fontSize: 12, padding: '4px 8px', borderTop: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,.2))' },
+      },
+        React.createElement('span', { style: { color: 'var(--dsw-alias-label-tertiary)', whiteSpace: 'nowrap' } }, '远端共享中'),
+        React.createElement('span', { style: { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--dsw-alias-label-secondary)' }, title: raw.slice(0, 2000) }, text || '等待对方输出…'),
+        React.createElement('button', { style: { fontSize: 11, padding: '2px 8px', borderRadius: 6, border: '1px solid rgba(127,127,127,.35)', background: 'transparent', color: 'inherit', cursor: 'pointer' }, disabled: stopping, onClick: stop }, stopping ? '停止中…' : '停止对方')
+      );
+    }
+
     function apply(ctx) {
       ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section',
@@ -243,6 +273,11 @@ window.__ModuleLoader__.load({
         order: 60,
         label: () => '会话同步',
       }, Section));
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({
+        name: 'conversation.composer.dock',
+        id: 'dsh-session-sync-live',
+        order: 30,
+      }, LiveDock));
     }
 
     module.exports = { apply, inject: ['slots'] };

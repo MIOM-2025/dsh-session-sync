@@ -113,7 +113,7 @@ export class LiveRelay {
               try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
               entry.events.push(payload.event);
               if (entry.events.length > MAX_BUFFER) entry.events.splice(0, entry.events.length - MAX_BUFFER);
-              try { this.onRemoteEvent(payload.sessionId ?? entry.id, payload.event); } catch { /* ignore */ }
+              try { this.onRemoteEvent(payload.sessionId ?? entry.id, payload.event, entry.url); } catch { /* ignore */ }
             }
           }
         }
@@ -137,6 +137,10 @@ export class LiveRelay {
 
   snapshot(rawUrl, id) {
     return this.remote.get(rawUrl + '|' + id)?.events ?? [];
+  }
+
+  watches() {
+    return [...this.remote.entries()].map(([, entry]) => ({ url: entry.url, id: entry.id }));
   }
 
   close() {
