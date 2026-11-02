@@ -72,6 +72,9 @@ export function apply(ctx, config = {}) {
     ctx.on('session/event', (session, event) => {
       const id = session?.id;
       if (typeof id !== 'string') return;
+      const type = String(event?.type ?? '');
+      if (type === 'turn/start') engine.markTurn(id, 'start');
+      else if (type === 'turn/end') engine.markTurn(id, 'end');
       if (engine.state.sessions[id]?.sync !== true) return;
       engine.publishLocal(id, summarizeEvent(event));
     });
@@ -200,7 +203,7 @@ async function panel(engine, connection, req, res) {
       const body = await jsonOf(req);
       const command = { id: body.id, type: body.type, text: body.text, mode: body.mode };
       if (typeof body.url === 'string' && body.url.length > 0) return json(200, await engine.sendCommand(body.url, command));
-      return json(200, await engine.handleCommand(command));
+      return json(200, await engine.submitCommand(command));
     }
     if (route === '/api/sync' && req.method === 'POST') {
       return json(200, await engine.syncNow());

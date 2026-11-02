@@ -222,7 +222,7 @@ window.__ModuleLoader__.load({
           ),
           React.createElement('div', { style: ui.row },
             React.createElement('input', { style: ui.input, value: draft, placeholder: '给这个会话发一条消息（由对方执行）', onChange: (event) => setDraft(event.target.value) }),
-            React.createElement('button', { style: ui.button, disabled: draft.trim() === '', onClick: () => run('send', async () => { const result = await call('/command', { url: target.url, id: target.id, type: 'message', text: draft }); if (result.ok === false) throw new Error(result.error || '发送失败'); setDraft(''); }) }, '发送'),
+            React.createElement('button', { style: ui.button, disabled: draft.trim() === '', onClick: () => run('send', async () => { const result = await call('/command', { url: target.url, id: target.id, type: 'message', text: draft }); if (result.ok === false) throw new Error(result.error || '发送失败'); setDraft(''); setStatus(result.queued === true ? '已排队，第 ' + (result.position ?? 1) + ' 位，等对方当前回合结束再执行' : '已发送'); }) }, '发送'),
             React.createElement('button', { style: ui.button, onClick: () => run('stop', async () => { const result = await call('/command', { url: target.url, id: target.id, type: 'stop' }); if (result.ok === false) throw new Error(result.error || '停止失败'); setStatus('已请求对方停止'); }) }, '停止对方')
           )
         ) : null

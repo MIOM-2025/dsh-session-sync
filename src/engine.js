@@ -80,6 +80,10 @@ export class SyncEngine {
     this.live = null;
     this.commandHandler = null;
     this.network = this.host === '127.0.0.1' || this.host === 'localhost' ? 'local' : 'lan';
+    this.turns = new Map();
+    this.queue = [];
+    this.queueRunning = null;
+    this.queueWake = null;
   }
 
   defaultState() {
@@ -245,7 +249,7 @@ export class SyncEngine {
         lastSyncAt: st.lastSyncAt ?? null,
       });
     }
-    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions };
+    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions, queue: this.queueStatus() };
     if (withRemote) {
       result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
       result.remote = [...this.remote.entries()].map(([url, value]) => ({ url, ok: value.ok, at: value.at, sessions: value.sessions }));
@@ -364,7 +368,7 @@ export class SyncEngine {
 
     if (url.pathname === '/command' && req.method === 'POST') {
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      return json(200, await this.handleCommand(body));
+      return json(200, await this.submitCommand(body));
     }
 
     if (url.pathname === '/sessions' && req.method === 'GET') {
@@ -401,11 +405,93 @@ export class SyncEngine {
     return json(404, { error: 'unknown route' });
   }
 
+  // ── 串行命令队列：远端操作排队，等当前回合结束再生效 ────────────────────
+  markTurn(sessionId, phase) {
+    if (typeof sessionId !== 'string') return;
+    if (phase === 'start') this.turns.set(sessionId, Date.now());
+    else this.turns.delete(sessionId);
+    if (phase !== 'start') this.pumpQueue();
+  }
+
+  isSessionBusy(sessionId) {
+    return this.turns.has(sessionId) || (this.queueRunning !== null && this.queueRunning.sessionId === sessionId);
+  }
+
+  queueStatus() {
+    return {
+      running: this.queueRunning === null ? null : { sessionId: this.queueRunning.sessionId, type: this.queueRunning.type, since: this.queueRunning.at },
+      pending: this.queue.map((item) => ({ sessionId: item.sessionId, type: item.type, at: item.at, from: item.from })),
+    };
+  }
+
+  async submitCommand(command) {
+    const type = String(command?.type ?? '');
+    if (type === 'stop') {
+      // 停止必须立刻生效，不能排在回合后面
+      return this.handleCommand(command);
+    }
+    if (type !== 'message') return { ok: false, error: 'unknown command' };
+    const item = { ...command, at: Date.now(), from: command?.from ?? 'remote' };
+    this.queue.push(item);
+    this.pumpQueue();
+    return { ok: true, queued: true, position: this.queue.length, queue: this.queueStatus() };
+  }
+
+  pumpQueue() {
+    if (this.queueRunning !== null) return;
+    const next = this.queue[0];
+    if (next === undefined) return;
+    if (this.turns.has(next.sessionId)) {
+      if (this.queueWake === null) {
+        this.queueWake = setTimeout(() => { this.queueWake = null; this.pumpQueue(); }, 1000);
+        this.queueWake.unref?.();
+      }
+      return;
+    }
+    this.queue.shift();
+    this.queueRunning = next;
+    this.runQueued(next).finally(() => {
+      this.queueRunning = null;
+      this.pumpQueue();
+    });
+  }
+
+  async runQueued(item) {
+    try {
+      await this.handleCommand(item);
+      await this.waitForTurnEnd(item.sessionId);
+    } catch (error) { this.log('queued command failed: ' + String(error)); }
+  }
+
+  async waitForTurnEnd(sessionId) {
+    const deadline = Date.now() + 10 * 60 * 1000;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    while (this.turns.has(sessionId)) {
+      if (Date.now() > deadline) { this.log('waitForTurnEnd timeout: ' + sessionId); return; }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+
+  // 只在文件稳定时取快照，避免读到正在写的半截日志
+  async stableSnapshot(session, record) {
+    try {
+      const first = await fsp.stat(session.file);
+      if (first.size !== record.size || first.mtimeMs !== record.mtime) return null;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const second = await fsp.stat(session.file);
+      if (second.size !== record.size || second.mtimeMs !== record.mtime) return null;
+    } catch { return null; }
+    return record;
+  }
+
   async install(item, from) {
     if (!item || typeof item.id !== 'string' || !item.id.startsWith('session-')) return { skipped: 'bad id' };
+    if (this.turns.has(item.id)) return { skipped: 'local turn active' };
     if (typeof item.data !== 'string') return { skipped: 'no data' };
     const st = this.state.sessions[item.id] ?? {};
     if (st.blocked === true) return { skipped: 'opted out' };
+    if (st.sync === true) return { skipped: 'local owner' }; // 一方勾选即一方是写者，拒绝反向写
+
     let bytes;
     try { bytes = Buffer.from(item.data, 'base64'); } catch { return { skipped: 'bad base64' }; }
     const hash = item.hash ?? sha256(bytes);
@@ -601,9 +687,11 @@ export class SyncEngine {
     for (const raw of this.scanSessions()) {
       const st = this.state.sessions[raw.id];
       if (!st || st.sync !== true) continue;
+      if (this.turns.has(raw.id)) continue; // 正在跑回合，等结束再同步，避免读到半截
       let record;
       try { record = await this.describe(raw, true); } catch { continue; }
       if (st.lastHash === record.hash) continue;
+      if ((await this.stableSnapshot(raw, record)) === null) continue;
       const payload = {
         device: this.state.device,
         sessions: [{ id: raw.id, group: raw.group, title: record.title, cwd: record.cwd, mtime: raw.mtime, hash: record.hash, data: record.bytes.toString('base64') }],
