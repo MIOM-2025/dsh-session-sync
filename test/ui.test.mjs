@@ -22,6 +22,8 @@ const ctx = {
   on: () => {},
   webServer: { register: (route) => { routes.push(route); return () => {}; } },
   tools: { register: (tool) => tools.push(tool) },
+  inject: (names, callback) => callback(ctx),
+  reflect: { get: (name) => (name === 'tools' ? ctx.tools : name === 'webServer' ? ctx.webServer : undefined) },
 };
 apply(ctx, { port: 17170, host: '127.0.0.1', intervalMs: 500 });
 await new Promise((resolve) => setTimeout(resolve, 600));

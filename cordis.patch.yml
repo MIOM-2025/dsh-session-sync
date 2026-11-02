@@ -6,7 +6,7 @@
     - id: session-sync
       name: dsh-session-sync
       config:
-        port: 6120
+        port: 1111
         host: 0.0.0.0
         intervalMs: 2000
         manifestMs: 10000

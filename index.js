@@ -6,6 +6,10 @@ export const inject = [];
 
 const PREFIX = '/session-sync';
 
+function warn(ctx, message) {
+  try { ctx.logger?.warn?.('[session-sync] ' + message); } catch { /* ignore */ }
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -15,123 +19,121 @@ function readBody(req) {
   });
 }
 
-function jsonOf(req) {
-  return readBody(req).then((buffer) => {
-    const text = buffer.toString('utf8');
-    return text.length === 0 ? {} : JSON.parse(text);
-  });
+async function jsonOf(req) {
+  const text = (await readBody(req)).toString('utf8');
+  return text.length === 0 ? {} : JSON.parse(text);
+}
+
+// cordis 的服务读取默认要求 inject 声明；面板接口和工具都是可选能力，
+// 所以统一用 reflect.get 读取，拿不到就跳过。
+function optionalService(ctx, name) {
+  try { return ctx.reflect?.get?.(name); } catch { return undefined; }
 }
 
 export function apply(ctx, config = {}) {
   const engine = new SyncEngine({
     home: config.home ?? process.env.DSH_HOME ?? os.homedir(),
-    port: Number(config.port ?? 6120),
+    port: Number(config.port ?? 1111),
     host: config.host ?? '0.0.0.0',
     device: config.device ?? os.hostname(),
     intervalMs: Number(config.intervalMs ?? 2000),
     manifestMs: Number(config.manifestMs ?? 10000),
-    log: (message) => { try { ctx.logger?.info?.('[session-sync] ' + message); } catch { /* ignore */ } },
+    log: (message) => warn(ctx, message),
   });
   engine.advertiseHost = config.advertiseHost ?? '';
 
-  engine.start().catch((error) => {
-    try { ctx.logger?.warn?.('[session-sync] start failed: ' + String(error)); } catch { /* ignore */ }
-  });
+  engine.start().catch((error) => warn(ctx, 'start failed: ' + String(error)));
 
-  // 供其它 Host 插件/工具拿到同一个引擎。
-  try { ctx.provide?.('sessionSync', engine); } catch { /* ignore */ }
+  try { ctx.provide?.('sessionSync', engine); } catch { /* optional */ }
   ctx.sessionSync = engine;
 
   const dispose = () => { engine.stop().catch(() => {}); };
-  if (typeof ctx.effect === 'function') {
-    try { ctx.effect(() => dispose); } catch { /* ignore */ }
-  } else if (typeof ctx.on === 'function') {
-    ctx.on('dispose', dispose);
-  }
+  try {
+    if (typeof ctx.effect === 'function') ctx.effect(() => dispose);
+    else ctx.on?.('dispose', dispose);
+  } catch { ctx.on?.('dispose', dispose); }
 
-  const panelHandler = async (req, res) => {
-    const json = (status, value) => {
-      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-      res.end(JSON.stringify(value));
+  // 面板接口挂在 DSH 自己的 webserver 上：/session-sync/api/*
+  const mountPanel = (web) => {
+    const connection = optionalService(web, 'connection');
+    const handler = (req, res) => {
+      panel(engine, connection, req, res).catch((error) => {
+        if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: String(error?.message ?? error) }));
+      });
     };
-    if (typeof ctx.connection?.authorizeIndex === 'function' && !ctx.connection.authorizeIndex(req, res)) return;
-    const url = new URL(req.url ?? '/', 'http://panel.invalid');
-    const route = url.pathname.slice(PREFIX.length) || '/';
     try {
-      if (route === '/api/state' && req.method === 'GET') {
-        return json(200, await engine.listLocal());
-      }
-      if (route === '/api/toggle' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        return json(200, await engine.setEnabled(body.id, body.enabled === true));
-      }
-      if (route === '/api/pair' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        return json(200, await engine.pairWith(body.url));
-      }
-      if (route === '/api/peer' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        if (body.remove) engine.removePeer(body.remove);
-        else engine.addPeer(body.url, body.name);
-        return json(200, { ok: true });
-      }
-      if (route === '/api/pull' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        const peer = engine.state.peers.find((entry) => entry.url === body.url);
-        if (!peer) return json(404, { error: 'unknown peer' });
-        const outcome = await engine.pullOne(peer, body.id);
-        return json(200, outcome);
-      }
-      if (route === '/api/sync' && req.method === 'POST') {
-        return json(200, await engine.syncNow());
-      }
-      if (route === '/api/settings' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        if (typeof body.autoSync === 'boolean') engine.state.autoSync = body.autoSync;
-        if (typeof body.allowPair === 'boolean') engine.state.allowPair = body.allowPair;
-        if (typeof body.pairCode === 'string') engine.state.pairCode = body.pairCode;
-        engine.save();
-        return json(200, { ok: true });
-      }
-      if (route === '/api/token' && req.method === 'POST') {
-        const body = await jsonOf(req);
-        return json(200, { token: engine.setToken(body.token) });
-      }
-      return json(404, { error: 'unknown route' });
+      web.webServer.register({ kind: 'prefix', path: PREFIX, handler });
     } catch (error) {
-      return json(400, { error: String(error?.message ?? error) });
+      warn(ctx, 'panel route registration failed: ' + String(error));
     }
   };
+  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], mountPanel);
+  else if (optionalService(ctx, 'webServer')) mountPanel(ctx);
 
-  if (ctx.webServer && typeof ctx.webServer.register === 'function') {
-    ctx.webServer.register({
-      kind: 'prefix',
-      path: PREFIX,
-      handler: (req, res) => {
-        panelHandler(req, res).catch((error) => {
-          if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ error: String(error?.message ?? error) }));
-        });
-      },
-    });
-  }
-
-  registerSessionSyncTool(ctx, engine);
-}
-
-export function registerSessionSyncTool(ctx, engine) {
-  let attempts = 0;
-  const attempt = () => {
-    attempts += 1;
-    if (!ctx.tools || typeof ctx.tools.register !== 'function') {
-      if (attempts < 10) setTimeout(attempt, 1000).unref?.();
-      return;
-    }
+  // agent 工具（可选）
+  const mountTool = (toolsCtx) => {
+    const tools = toolsCtx.tools;
+    if (!tools || typeof tools.register !== 'function') return;
     buildTool(engine).then((tool) => {
-      try { ctx.tools.register(tool); } catch (error) { ctx.logger?.warn?.('[session-sync] tool registration failed: ' + String(error)); }
+      try { tools.register(tool); } catch (error) { warn(ctx, 'tool registration failed: ' + String(error)); }
     }).catch(() => {});
   };
-  attempt();
+  if (typeof ctx.inject === 'function') ctx.inject(['tools'], mountTool);
+  else if (optionalService(ctx, 'tools')) mountTool(ctx);
+}
+
+async function panel(engine, connection, req, res) {
+  const json = (status, value) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+    res.end(JSON.stringify(value));
+  };
+  if (typeof connection?.authorizeIndex === 'function' && !connection.authorizeIndex(req, res)) return;
+  const url = new URL(req.url ?? '/', 'http://panel.invalid');
+  const route = url.pathname.slice(PREFIX.length) || '/';
+  try {
+    if (route === '/api/state' && req.method === 'GET') {
+      return json(200, await engine.listLocal());
+    }
+    if (route === '/api/toggle' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      return json(200, await engine.setEnabled(body.id, body.enabled === true));
+    }
+    if (route === '/api/pair' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      return json(200, await engine.pairWith(body.url));
+    }
+    if (route === '/api/peer' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      if (body.remove) engine.removePeer(body.remove);
+      else engine.addPeer(body.url, body.name);
+      return json(200, { ok: true });
+    }
+    if (route === '/api/pull' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      const peer = engine.state.peers.find((entry) => entry.url === body.url);
+      if (!peer) return json(404, { error: 'unknown peer' });
+      return json(200, await engine.pullOne(peer, body.id));
+    }
+    if (route === '/api/sync' && req.method === 'POST') {
+      return json(200, await engine.syncNow());
+    }
+    if (route === '/api/settings' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      if (typeof body.autoSync === 'boolean') engine.state.autoSync = body.autoSync;
+      if (typeof body.allowPair === 'boolean') engine.state.allowPair = body.allowPair;
+      if (typeof body.pairCode === 'string') engine.state.pairCode = body.pairCode;
+      engine.save();
+      return json(200, { ok: true });
+    }
+    if (route === '/api/token' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      return json(200, { token: engine.setToken(body.token) });
+    }
+    return json(404, { error: 'unknown route' });
+  } catch (error) {
+    return json(400, { error: String(error?.message ?? error) });
+  }
 }
 
 async function buildTool(engine) {
@@ -143,7 +145,7 @@ async function buildTool(engine) {
     parameters: {
       action: { type: 'string', required: true, enum: ['status', 'list', 'enable', 'disable', 'pair', 'sync', 'pull'], description: '要执行的操作。' },
       sessionId: { type: 'string', description: 'enable/disable/pull 时的会话 id（session-...）。' },
-      url: { type: 'string', description: 'pair/pull 时的对端地址，例如 192.168.1.8:6120。' },
+      url: { type: 'string', description: 'pair/pull 时的对端地址，例如 192.168.1.8:1111。' },
     },
     output: {
       schema: {
