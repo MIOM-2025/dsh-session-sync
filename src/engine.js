@@ -77,6 +77,9 @@ export class SyncEngine {
     this.stopFlag = false;
     this.saveTimer = null;
     this.installHooks = [];
+    this.live = null;
+    this.commandHandler = null;
+    this.network = this.host === '127.0.0.1' || this.host === 'localhost' ? 'local' : 'lan';
   }
 
   defaultState() {
@@ -148,14 +151,26 @@ export class SyncEngine {
     this.timer = setInterval(() => { this.tick(); }, this.intervalMs);
     this.timer.unref?.();
     this.record('listening on ' + this.host + ':' + this.port);
+    const { LiveRelay } = await import('./live.js');
+    this.live = new LiveRelay(this, {
+      getSharedIds: () => this.enabledIds(),
+      onCommand: (command) => this.handleCommand(command),
+      onRemoteEvent: (id, event) => this.remoteEventHook?.(id, event),
+      log: (message) => this.log(message),
+    });
     return this;
   }
 
   async stop() {
     this.stopFlag = true;
+    this.live?.close();
     if (this.timer !== null) { clearInterval(this.timer); this.timer = null; }
     if (this.server !== null) {
-      await new Promise((resolve) => this.server.close(() => resolve()));
+      const closing = this.server;
+      await new Promise((resolve) => {
+        closing.close(() => resolve());
+        closing.closeAllConnections?.();
+      });
       this.server = null;
     }
     if (this.saveTimer !== null) { clearTimeout(this.saveTimer); this.saveTimer = null; }
@@ -230,7 +245,7 @@ export class SyncEngine {
         lastSyncAt: st.lastSyncAt ?? null,
       });
     }
-    const result = { device: this.state.device, port: this.port, token: this.state.token, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions };
+    const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions };
     if (withRemote) {
       result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
       result.remote = [...this.remote.entries()].map(([url, value]) => ({ url, ok: value.ok, at: value.at, sessions: value.sessions }));
@@ -342,6 +357,16 @@ export class SyncEngine {
 
     if (!this.authOk(req)) return json(401, { error: 'bad token' });
 
+    if (url.pathname === '/live' && req.method === 'GET') {
+      await this.live.serve(req, res, url);
+      return;
+    }
+
+    if (url.pathname === '/command' && req.method === 'POST') {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      return json(200, await this.handleCommand(body));
+    }
+
     if (url.pathname === '/sessions' && req.method === 'GET') {
       const out = [];
       for (const raw of this.scanSessions()) {
@@ -425,6 +450,19 @@ export class SyncEngine {
     return { installed: true };
   }
 
+  async fetchWithRetry(run, attempts = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try { return await run(); } catch (error) {
+        lastError = error;
+        const code = error?.cause?.code ?? error?.code ?? '';
+        if (!/UND_ERR_SOCKET|ECONNRESET|other side closed|EPIPE/.test(String(code)) && !/other side closed/.test(String(error?.message))) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  }
+
   async postJson(peer, pathname, payload) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
@@ -443,6 +481,10 @@ export class SyncEngine {
   }
 
   async getJson(peer, pathname) {
+    return this.fetchWithRetry(async () => this.getJsonOnce(peer, pathname));
+  }
+
+  async getJsonOnce(peer, pathname) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
@@ -461,6 +503,83 @@ export class SyncEngine {
     peer.ok = ok;
     peer.error = ok ? null : String(error ?? 'unreachable');
     if (ok) peer.lastSeen = Date.now();
+  }
+
+  tokenFor(rawUrl) {
+    const url = normalizeUrl(rawUrl);
+    const peer = this.state.peers.find((entry) => entry.url === url);
+    return peer?.token ?? this.state.token;
+  }
+
+  publishLocal(sessionId, event) {
+    this.live?.publish(sessionId, event);
+  }
+
+  watchRemote(rawUrl, id) {
+    this.live?.watch(normalizeUrl(rawUrl), id);
+    return { ok: true };
+  }
+
+  unwatchRemote(rawUrl, id) {
+    this.live?.unwatch(normalizeUrl(rawUrl), id);
+    return { ok: true };
+  }
+
+  liveSnapshot(rawUrl, id) {
+    return this.live?.snapshot(normalizeUrl(rawUrl), id) ?? [];
+  }
+
+  async handleCommand(command) {
+    if (typeof this.commandHandler !== 'function') return { ok: false, error: 'no command handler' };
+    try {
+      return await this.commandHandler(command);
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error) };
+    }
+  }
+
+  async sendCommand(rawUrl, command) {
+    const url = normalizeUrl(rawUrl);
+    const peer = this.state.peers.find((entry) => entry.url === url);
+    if (peer === undefined) throw new Error('unknown peer');
+    return this.postJson(peer, '/command', command);
+  }
+
+  async setNetwork(mode) {
+    const next = mode === 'local' ? '127.0.0.1' : '0.0.0.0';
+    this.network = mode === 'local' ? 'local' : 'lan';
+    if (this.host === next) {
+      this.state.network = this.network;
+      this.save();
+      return this.network;
+    }
+    const running = this.server !== null;
+    if (running) {
+      const closing = this.server;
+      await new Promise((resolve) => {
+        closing.close(() => resolve());
+        closing.closeAllConnections?.();
+      });
+    }
+    this.server = null;
+    this.host = next;
+    if (running) {
+      this.server = http.createServer((req, res) => {
+        this.handle(req, res).catch((error) => {
+          if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: String(error?.message ?? error) }));
+        });
+      });
+      await new Promise((resolve, reject) => {
+        this.server.once('error', reject);
+        this.server.listen(this.port, this.host, () => resolve());
+      });
+      this.port = this.server.address().port;
+    }
+    this.state.network = this.network;
+    this.save();
+    this.record('network ' + this.network + ' on ' + this.host + ':' + this.port);
+    return this.network;
   }
 
   async tick() {

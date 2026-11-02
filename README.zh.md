@@ -53,3 +53,26 @@ dsh plugin --profile web add link:~/dsh-session-sync
 node test/engine.test.mjs   # 双引擎互推/实时更新/取消勾选/鉴权
 node test/pair.test.mjs     # 自动配对、拉取、拒绝配对
 ```
+
+## v0.2 实时共享（本次新增）
+
+- **配对只要地址**：面板填 `192.168.1.8:1111` 点「连接」，双方自动互换地址和令牌。
+- **本机 / 局域网**：面板一键切换，`仅本机` 只绑 127.0.0.1，`局域网` 绑 0.0.0.0，切换时服务不中断。
+- **实时事件流**：勾选共享的会话，本机 `session/event` 会通过 SSE（`GET /live?id=...`）推给对端，
+  对端在「实时查看」里能看到回复、工具调用、工具结果、轮次状态，延迟约 1 秒内。
+- **远程指令**：`POST /command`，`{type:'stop'}` 让对端调用 `sessionController.cancel`，
+  `{type:'message', text}` 让对端把消息送进该会话（`sessionController.prompt`）。
+- **断线重连**：SSE 断开后 2 秒自动重连，重连时补发缓冲区里的事件。
+
+已知边界：镜像进 DSH 原生侧边栏（把对方会话变成本机可点开的会话）还没做，目前实时视图在插件面板里；
+文件拉取仍是整文件离线副本。
+
+## 测试
+
+```bash
+node test/engine.test.mjs   # 文件同步/实时更新/取消勾选/鉴权
+node test/pair.test.mjs     # 自动配对/拉取/拒绝配对
+node test/live.test.mjs     # SSE 实时流/补发/远程停止/鉴权/网络切换
+node test/ui.test.mjs       # 面板接口/工具/client bundle
+node test/port.test.mjs     # 1111 端口真实监听
+```

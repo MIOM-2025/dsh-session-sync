@@ -1,5 +1,30 @@
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { SyncEngine } from './src/engine.js';
+
+// 实时事件只带渲染需要的内容，避免把大块工具输出也推过去。
+function summarizeEvent(event) {
+  if (event === null || typeof event !== 'object') return { type: 'unknown' };
+  const data = event.data ?? {};
+  const type = String(event.type ?? 'unknown');
+  const clip = (value, max = 4000) => {
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return text.length > max ? text.slice(0, max) + '…' : text;
+  };
+  const summary = { type, seq: event.seq, time: event.time };
+  if (type === 'assistant/message' || type === 'user/message') {
+    summary.text = clip(data.content ?? data.text ?? '', 4000);
+  } else if (type === 'tool/call') {
+    summary.text = clip({ name: data.name, args: data.args }, 2000);
+  } else if (type === 'tool/result') {
+    summary.text = clip(data.data ?? data.result ?? data, 1500);
+  } else if (type === 'turn/start' || type === 'turn/end' || type === 'step/start' || type === 'step/end') {
+    summary.text = '';
+  } else {
+    summary.text = clip(data, 800);
+  }
+  return summary;
+}
 
 export const name = 'dsh-session-sync';
 export const inject = [];
@@ -41,6 +66,44 @@ export function apply(ctx, config = {}) {
     log: (message) => warn(ctx, message),
   });
   engine.advertiseHost = config.advertiseHost ?? '';
+
+  // 把本机共享会话的实时事件推给已配对的对端
+  try {
+    ctx.on('session/event', (session, event) => {
+      const id = session?.id;
+      if (typeof id !== 'string') return;
+      if (engine.state.sessions[id]?.sync !== true) return;
+      engine.publishLocal(id, summarizeEvent(event));
+    });
+  } catch (error) { warn(ctx, 'session event subscription failed: ' + String(error)); }
+
+  // 对端发来的停止/输入指令
+  engine.commandHandler = async (command) => {
+    const id = String(command?.id ?? '');
+    if (!id.startsWith('session-')) return { ok: false, error: 'bad session id' };
+    const controller = optionalService(ctx, 'sessionController');
+    if (controller === undefined) return { ok: false, error: 'session controller unavailable' };
+    if (command.type === 'stop') {
+      try {
+        controller.cancel({ sessionId: id });
+        return { ok: true };
+      } catch (error) { return { ok: false, error: String(error?.message ?? error) }; }
+    }
+    if (command.type === 'message') {
+      const text = String(command.text ?? '').trim();
+      if (text.length === 0) return { ok: false, error: 'empty message' };
+      try {
+        await controller.prompt({
+          sessionId: id,
+          content: [{ type: 'text', text }],
+          mode: command.mode === 'steer' ? 'steer' : 'followup',
+          requestId: randomUUID(),
+        }, { kind: 'user' });
+        return { ok: true };
+      } catch (error) { return { ok: false, error: String(error?.message ?? error) }; }
+    }
+    return { ok: false, error: 'unknown command' };
+  };
 
   engine.start().catch((error) => warn(ctx, 'start failed: ' + String(error)));
 
@@ -114,6 +177,30 @@ async function panel(engine, connection, req, res) {
       const peer = engine.state.peers.find((entry) => entry.url === body.url);
       if (!peer) return json(404, { error: 'unknown peer' });
       return json(200, await engine.pullOne(peer, body.id));
+    }
+    if (route === '/api/network' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      const network = await engine.setNetwork(body.mode === 'local' ? 'local' : 'lan');
+      return json(200, { network, host: engine.host, port: engine.port });
+    }
+    if (route === '/api/watch' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      engine.watchRemote(body.url, String(body.id ?? ''));
+      return json(200, { ok: true });
+    }
+    if (route === '/api/unwatch' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      engine.unwatchRemote(body.url, String(body.id ?? ''));
+      return json(200, { ok: true });
+    }
+    if (route === '/api/live' && req.method === 'GET') {
+      return json(200, { events: engine.liveSnapshot(url.searchParams.get('url') ?? '', url.searchParams.get('id') ?? '') });
+    }
+    if (route === '/api/command' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      const command = { id: body.id, type: body.type, text: body.text, mode: body.mode };
+      if (typeof body.url === 'string' && body.url.length > 0) return json(200, await engine.sendCommand(body.url, command));
+      return json(200, await engine.handleCommand(command));
     }
     if (route === '/api/sync' && req.method === 'POST') {
       return json(200, await engine.syncNow());
