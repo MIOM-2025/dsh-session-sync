@@ -167,7 +167,7 @@ async function panel(engine, connection, req, res) {
     }
     if (route === '/api/pair' && req.method === 'POST') {
       const body = await jsonOf(req);
-      return json(200, await engine.pairWith(body.url));
+      return json(200, await engine.pairWith(body.url, body.token ?? '', body.scope ?? 'work'));
     }
     if (route === '/api/peer' && req.method === 'POST') {
       const body = await jsonOf(req);
@@ -198,6 +198,10 @@ async function panel(engine, connection, req, res) {
     }
     if (route === '/api/live' && req.method === 'GET') {
       return json(200, { events: engine.liveSnapshot(url.searchParams.get('url') ?? '', url.searchParams.get('id') ?? '') });
+    }
+    if (route === '/api/scope' && req.method === 'POST') {
+      const body = await jsonOf(req);
+      return json(200, engine.setPeerScope(body.url, body.scope));
     }
     if (route === '/api/command' && req.method === 'POST') {
       const body = await jsonOf(req);
@@ -236,6 +240,8 @@ async function buildTool(engine) {
       action: { type: 'string', required: true, enum: ['status', 'list', 'enable', 'disable', 'pair', 'sync', 'pull'], description: '要执行的操作。' },
       sessionId: { type: 'string', description: 'enable/disable/pull 时的会话 id（session-...）。' },
       url: { type: 'string', description: 'pair/pull 时的对端地址，例如 192.168.1.8:1111。' },
+      token: { type: 'string', description: 'pair 时对方面板上的一次性令牌。' },
+      scope: { type: 'string', enum: ['read', 'work'], description: 'pair 时的权限：read 只读，work 可共同工作。' },
     },
     output: {
       schema: {
@@ -258,7 +264,7 @@ async function buildTool(engine) {
         return { ok: true, summary: (action === 'enable' ? '已勾选同步 ' : '已取消同步 ') + args.sessionId, data: { sessionId: args.sessionId } };
       }
       if (action === 'pair') {
-        const paired = await engine.pairWith(String(args.url ?? ''));
+        const paired = await engine.pairWith(String(args.url ?? ''), String(args.token ?? ''), String(args.scope ?? 'work'));
         return { ok: true, summary: '已与 ' + (paired.device ?? paired.url) + ' 配对', data: paired };
       }
       if (action === 'sync') {

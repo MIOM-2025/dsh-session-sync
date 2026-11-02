@@ -59,6 +59,33 @@ b.state.allowPair = false;
 await assert.rejects(() => c.pairWith('127.0.0.1:17151'), /pair rejected|403/);
 console.log('PASS pairing can be refused');
 
+
+// 令牌权限：只读设备能拉取，但不能发指令
+b.state.allowPair = true;
+const homeD = path.join(root, 'd');
+await fsp.mkdir(homeD, { recursive: true });
+const d = new SyncEngine({ home: homeD, port: 17153, host: '127.0.0.1', device: 'D' });
+await d.start();
+const pairedRead = await d.pairWith('127.0.0.1:17151', b.state.token, 'read');
+assert.equal(pairedRead.scope, 'read');
+const peerOfD = b.state.peers.find((peer) => peer.url.includes('17153'));
+assert.equal(peerOfD.scope, 'read');
+const denied = await fetch('http://127.0.0.1:17151/command', { method: 'POST', headers: { 'content-type': 'application/json', 'x-session-sync-token': d.state.token }, body: JSON.stringify({ id: 'session-x', type: 'message', text: 'hi' }) });
+assert.equal(denied.status, 403);
+const readAllowed = await fetch('http://127.0.0.1:17151/sessions', { headers: { 'x-session-sync-token': d.state.token } });
+assert.equal(readAllowed.status, 200);
+console.log('PASS read-only scope');
+await d.stop();
+
+// 一次性令牌：填了错误令牌要拒绝
+const homeE = path.join(root, 'e');
+await fsp.mkdir(homeE, { recursive: true });
+const e = new SyncEngine({ home: homeE, port: 17154, host: '127.0.0.1', device: 'E' });
+await e.start();
+await assert.rejects(() => e.pairWith('127.0.0.1:17151', 'wrong-token'), /403|pair rejected/);
+console.log('PASS wrong token rejected');
+await e.stop();
+
 await a.stop(); await b.stop(); await c.stop();
 await fsp.rm(root, { recursive: true, force: true });
 console.log('PAIR TESTS PASSED');

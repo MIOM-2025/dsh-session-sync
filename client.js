@@ -68,6 +68,8 @@ window.__ModuleLoader__.load({
       const [target, setTarget] = useState(null);
       const [events, setEvents] = useState([]);
       const [busy, setBusy] = useState('');
+      const [pairToken, setPairToken] = useState('');
+      const [scope, setScope] = useState('work');
       const targetRef = useRef(null);
       targetRef.current = target;
 
@@ -78,7 +80,7 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         refresh();
-        const timer = setInterval(refresh, 3000);
+        const timer = setInterval(refresh, 1000);
         return () => clearInterval(timer);
       }, [refresh]);
 
@@ -145,9 +147,14 @@ window.__ModuleLoader__.load({
           ),
           React.createElement('div', { style: ui.row },
             React.createElement('input', { style: ui.input, value: url, placeholder: '对方地址，例如 192.168.1.8:' + state.port, onChange: (event) => setUrl(event.target.value) }),
-            React.createElement('button', { style: ui.button, disabled: url.trim() === '' || busy !== '', onClick: () => run('pair', async () => { const paired = await call('/pair', { url: url.trim() }); setStatus('已连接 ' + (paired.device || paired.url)); setUrl(''); }) }, busy === 'pair' ? '连接中…' : '连接')
+            React.createElement('input', { style: { ...ui.input, flex: '0 0 140px' }, value: pairToken, placeholder: '对方令牌（可选）', onChange: (event) => setPairToken(event.target.value) }),
+            React.createElement('select', { style: { ...ui.input, flex: '0 0 120px' }, value: scope, onChange: (event) => setScope(event.target.value) },
+              React.createElement('option', { value: 'work' }, '可共同工作'),
+              React.createElement('option', { value: 'read' }, '只读')
+            ),
+            React.createElement('button', { style: ui.button, disabled: url.trim() === '' || busy !== '', onClick: () => run('pair', async () => { const paired = await call('/pair', { url: url.trim(), token: pairToken.trim(), scope }); setStatus('已连接 ' + (paired.device || paired.url) + '（' + (paired.scope === 'read' ? '只读' : '可共同工作') + '）'); setUrl(''); setPairToken(''); }) }, busy === 'pair' ? '连接中…' : '连接')
           ),
-          React.createElement('div', { style: ui.hint }, '配对只需填对方地址；地址与令牌由双方自动交换。'),
+          React.createElement('div', { style: ui.hint }, '填对方地址即可连接；对方令牌可选填（一个端口下有多台设备时，填了才确保连的是那一台）。只读方不能发消息/停止，也不能反向推送。'),
           error ? React.createElement('div', { style: ui.error }, error) : null,
           status ? React.createElement('div', { style: ui.hint }, status) : null
         ),
@@ -161,7 +168,7 @@ window.__ModuleLoader__.load({
               state.peers.map((peer) => React.createElement('div', { key: peer.url, style: ui.item },
                 React.createElement('span', { style: peer.ok ? ui.ok : ui.error }, peer.ok ? '●' : '○'),
                 React.createElement('span', { style: ui.name }, peer.url),
-                React.createElement('span', { style: ui.meta }, peer.ok ? '在线' : (peer.error || '离线')),
+                React.createElement('span', { style: ui.meta }, (peer.scope === 'read' ? '只读' : '共同工作') + ' · ' + (peer.ok ? '在线' : (peer.error || '离线'))),
                 React.createElement('button', { style: ui.button, onClick: () => run('rm', () => call('/peer', { remove: peer.url })) }, '删除')
               ))
             )

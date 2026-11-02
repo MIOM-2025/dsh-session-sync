@@ -108,7 +108,7 @@ export class SyncEngine {
     this.state = { ...this.defaultState(), ...(raw ?? {}) };
     this.state.sessions = this.state.sessions ?? {};
     this.state.peers = (Array.isArray(this.state.peers) ? this.state.peers : [])
-      .map((peer) => ({ url: normalizeUrl(peer.url), name: peer.name ?? '', token: peer.token }))
+      .map((peer) => ({ url: normalizeUrl(peer.url), name: peer.name ?? '', token: peer.token, scope: peer.scope === 'read' ? 'read' : 'work' }))
       .filter((peer) => peer.url.length > 0);
     if (!Array.isArray(this.state.events)) this.state.events = [];
     this.device = this.state.device || this.device;
@@ -251,7 +251,7 @@ export class SyncEngine {
     }
     const result = { device: this.state.device, port: this.port, token: this.state.token, network: this.network, host: this.host, autoSync: this.state.autoSync !== false, allowPair: this.state.allowPair !== false, pairCode: this.state.pairCode ?? '', lanAddress: this.lanAddress(), sessions, queue: this.queueStatus() };
     if (withRemote) {
-      result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
+      result.peers = this.state.peers.map((peer) => ({ url: peer.url, name: peer.name, scope: peer.scope ?? 'work', ok: peer.ok === true, lastSeen: peer.lastSeen ?? null, error: peer.error ?? null }));
       result.remote = [...this.remote.entries()].map(([url, value]) => ({ url, ok: value.ok, at: value.at, sessions: value.sessions }));
     }
     return result;
@@ -276,11 +276,21 @@ export class SyncEngine {
     return this.state.sessions[id];
   }
 
-  addPeer(rawUrl, name = '', token) {
+  setPeerScope(rawUrl, scope) {
+    const url = normalizeUrl(rawUrl);
+    const peer = this.state.peers.find((entry) => entry.url === url);
+    if (peer === undefined) throw new Error('unknown peer');
+    peer.scope = scope === 'read' ? 'read' : 'work';
+    this.record('scope ' + url + ' -> ' + peer.scope);
+    this.save();
+    return { url, scope: peer.scope };
+  }
+
+  addPeer(rawUrl, name = '', token, scope = 'work') {
     const url = normalizeUrl(rawUrl);
     if (!url) throw new Error('empty peer url');
     if (!this.peerUrlSet().has(url)) {
-      this.state.peers.push({ url, name, token });
+      this.state.peers.push({ url, name, token, scope: scope === 'read' ? 'read' : 'work' });
       this.record('added peer ' + url);
       this.save();
       this.tick();
@@ -296,12 +306,26 @@ export class SyncEngine {
     this.save();
   }
 
-  authOk(req) {
+  tokenOf(req) {
     const header = req.headers['x-session-sync-token'];
     const token = Array.isArray(header) ? header[0] : header;
-    if (typeof token !== 'string' || token.length === 0) return false;
-    if (token === this.state.token) return true;
-    return this.state.peers.some((peer) => typeof peer.token === 'string' && peer.token === token);
+    return typeof token === 'string' ? token : '';
+  }
+
+  // 令牌 → 身份：本机令牌是 owner（可写），每个配对设备有自己的令牌和权限
+  peerForToken(token) {
+    if (typeof token !== 'string' || token.length === 0) return null;
+    if (token === this.state.token) return { self: true, scope: 'work', peer: null };
+    const peer = this.state.peers.find((entry) => typeof entry.token === 'string' && entry.token === token);
+    return peer === undefined ? null : { self: false, scope: peer.scope ?? 'work', peer };
+  }
+
+  authOk(req) {
+    return this.peerForToken(this.tokenOf(req)) !== null;
+  }
+
+  scopeOf(req) {
+    return this.peerForToken(this.tokenOf(req))?.scope ?? null;
   }
 
   lanAddress() {
@@ -314,21 +338,29 @@ export class SyncEngine {
     return '127.0.0.1';
   }
 
-  async pairWith(rawUrl) {
+  // 一次性令牌配对：对方把本机面板上显示的令牌填进来即可，双方从此各用各的设备令牌。
+  async pairWith(rawUrl, providedToken = '', scope = 'work') {
     const url = normalizeUrl(rawUrl);
     if (!url) throw new Error('empty peer url');
+    const wanted = scope === 'read' ? 'read' : 'work';
     const ping = await fetch(url + '/ping').then((response) => response.json());
     if (ping.app !== APP_ID) throw new Error('not a dsh-session-sync peer');
     const response = await fetch(url + '/pair-request', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ url: 'http://' + (this.advertiseHost || this.lanAddress()) + ':' + this.port, device: this.state.device, token: this.state.token, code: this.state.pairCode ?? '' }),
+      body: JSON.stringify({
+        url: 'http://' + (this.advertiseHost || this.lanAddress()) + ':' + this.port,
+        device: this.state.device,
+        token: this.state.token,
+        code: String(providedToken ?? ''),
+        scope: wanted,
+      }),
     });
     if (!response.ok) throw new Error('pair rejected: HTTP ' + response.status);
     const data = await response.json();
-    this.addPeer(url, data.device ?? ping.device ?? '', data.token);
-    this.record('paired with ' + (data.device ?? url));
-    return { url, device: data.device ?? ping.device };
+    this.addPeer(url, data.device ?? ping.device ?? '', data.token, data.scope ?? wanted);
+    this.record('paired with ' + (data.device ?? url) + ' (' + (data.scope ?? wanted) + ')');
+    return { url, device: data.device ?? ping.device, scope: data.scope ?? wanted };
   }
 
   setToken(token) {
@@ -352,11 +384,18 @@ export class SyncEngine {
     if (url.pathname === '/pair-request' && req.method === 'POST') {
       if (this.state.allowPair === false) return json(403, { error: 'pairing disabled' });
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
-      if (this.state.pairCode && body.code !== this.state.pairCode) return json(403, { error: 'bad pair code' });
+      // 配对码优先；没设配对码时，填本机令牌也算一次性凭证；都没填则按 allowPair 放行。
+      const code = String(body.code ?? '');
+      if (this.state.pairCode) {
+        if (code !== this.state.pairCode && code !== this.state.token) return json(403, { error: 'bad pair code' });
+      } else if (code.length > 0 && code !== this.state.token) {
+        return json(403, { error: 'bad pair token' });
+      }
       const peerUrl = normalizeUrl(body.url ?? '');
-      if (peerUrl) this.addPeer(peerUrl, body.device ?? '', body.token);
-      this.record('paired with ' + (body.device ?? peerUrl));
-      return json(200, { app: APP_ID, device: this.state.device, port: this.port, token: this.state.token });
+      const scope = body.scope === 'read' ? 'read' : 'work';
+      if (peerUrl) this.addPeer(peerUrl, body.device ?? '', body.token, scope);
+      this.record('paired with ' + (body.device ?? peerUrl) + ' (' + scope + ')');
+      return json(200, { app: APP_ID, device: this.state.device, port: this.port, token: this.state.token, scope });
     }
 
     if (!this.authOk(req)) return json(401, { error: 'bad token' });
@@ -367,6 +406,7 @@ export class SyncEngine {
     }
 
     if (url.pathname === '/command' && req.method === 'POST') {
+      if (this.scopeOf(req) !== 'work') return json(403, { error: 'read-only peer' });
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       return json(200, await this.submitCommand(body));
     }
@@ -393,6 +433,7 @@ export class SyncEngine {
     }
 
     if (url.pathname === '/push' && req.method === 'POST') {
+      if (this.scopeOf(req) !== 'work') return json(403, { error: 'read-only peer' });
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       const accepted = [];
       for (const item of Array.isArray(body.sessions) ? body.sessions : []) {
