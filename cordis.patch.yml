@@ -1,0 +1,12 @@
+# dsh-session-sync bundle patch.
+#
+# Host 半身：在 0.0.0.0 上开一个同步端口（默认 6120），并注册 /session-sync
+# 面板接口；浏览器半身由 package.json 的 dsh.client 声明，挂到「设置」里。
+- insert:
+    - id: session-sync
+      name: dsh-session-sync
+      config:
+        port: 6120
+        host: 0.0.0.0
+        intervalMs: 2000
+        manifestMs: 10000

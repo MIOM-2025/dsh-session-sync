@@ -1,0 +1,39 @@
+{
+  "name": "dsh-session-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "在局域网内实时同步 DSH 会话（绘画）的小插件：两端安装后配对，即可按会话勾选同步，支持本地数据与 HTTP 调用两种方式。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "sync",
+    "lan"
+  ],
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "client.js",
+    "src",
+    "cordis.patch.yml",
+    "README.zh.md",
+    "locale"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}
